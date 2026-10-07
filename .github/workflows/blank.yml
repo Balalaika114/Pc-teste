@@ -1,0 +1,98 @@
+steps:
+  - name: Install desktop and RDP
+    shell: bash
+    run: |
+      set -e
+      sudo apt-get update
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        xfce4 xfce4-goodies xrdp dbus-x11 curl unzip
+
+      sudo systemctl enable xrdp
+      sudo systemctl start xrdp
+
+  - name: Create VM user
+    shell: bash
+    env:
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+    run: |
+      set -e
+
+      if [ -z "$RDP_PASSWORD" ]; then
+        echo "Configure the GitHub secret RDP_PASSWORD first."
+        exit 1
+      fi
+
+      sudo useradd -m -s /bin/bash vmuser || true
+      echo "vmuser:$RDP_PASSWORD" | sudo chpasswd
+      sudo usermod -aG sudo vmuser
+
+      sudo -u vmuser bash -c 'cat > ~/.xsession <<EOF
+      startxfce4
+      EOF'
+
+      sudo sed -i 's/^new_cursors=true/new_cursors=false/' /etc/xrdp/xrdp.ini || true
+      sudo systemctl restart xrdp
+
+  - name: Install ngrok
+    shell: bash
+    run: |
+      set -e
+      curl -L -o /tmp/ngrok.zip \
+        https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip
+      sudo unzip -o /tmp/ngrok.zip -d /usr/local/bin
+      sudo chmod +x /usr/local/bin/ngrok
+
+  - name: Start secure tunnel
+    shell: bash
+    env:
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+    run: |
+      set -e
+
+      if [ -z "$NGROK_AUTHTOKEN" ]; then
+        echo "Configure the GitHub secret NGROK_AUTHTOKEN first."
+        exit 1
+      fi
+
+      ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+      nohup ngrok tcp 3389 > /tmp/ngrok.log 2>&1 &
+
+      for i in {1..30}; do
+        sleep 2
+        if curl -fsS http://127.0.0.1:4040/api/tunnels >/tmp/tunnels.json; then
+          break
+        fi
+      done
+
+      python3 - <<'PY'
+      import json
+      import sys
+
+      try:
+          with open("/tmp/tunnels.json") as f:
+              data = json.load(f)
+          tunnels = data.get("tunnels", [])
+          if not tunnels:
+              raise RuntimeError("No ngrok tunnel was created.")
+          public_url = tunnels[0]["public_url"]
+          print()
+          print("========================================")
+          print("  VIRTUAL PC READY")
+          print("  RDP address:", public_url.replace("tcp://", ""))
+          print("  Username: vmuser")
+          print("  Password: the RDP_PASSWORD secret")
+          print("========================================")
+          print()
+      except Exception as exc:
+          print("Could not read the ngrok tunnel:", exc)
+          print(open("/tmp/ngrok.log").read())
+          sys.exit(1)
+      PY
+
+  - name: Keep the virtual PC online
+    shell: bash
+    run: |
+      echo "The VM stays online while this GitHub Actions job is running."
+      while true; do
+        sleep 300
+      done
