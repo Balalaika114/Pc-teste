@@ -1,4 +1,4 @@
-steps:
+steps:PC virtual
   - name: Install desktop and RDP
     shell: bash
     run: |
